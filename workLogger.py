@@ -25,6 +25,11 @@ from jira.exceptions import JIRAError
 
 # activation
 from Activation import ConvertActivationCode, CheckActivationStatus
+SRC_PATH = Path(__file__).resolve().parent / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
+
+from worklogger.legacy_utils import check_activation_status, parse_flexible_date, parse_hour_minute
 
 # ----- Logging Setup -----
 logging.basicConfig(
@@ -53,43 +58,8 @@ def resource_path(relative_path):
 # ------------ Convert -------------
 
 def date_to_iso_date(date_input: Union[str, datetime], toString: bool = True) -> Optional[Union[datetime, str]]:
-    """
-    Tarihi ISO formatına çevirme. Birden fazla format destekler.
-    
-    Args:
-        date_input: Tarih nesnesi veya string
-        toString: True ise string döner, False ise datetime
-    
-    Returns:
-        ISO format tarih veya datetime nesnesi
-    """
-    if isinstance(date_input, datetime):
-        if toString:
-            return str(date_input.date())
-        return date_input
-    
-    SUPPORTED_DATE_FORMATS = [
-        "%d.%m.%Y",    # 12.05.2025
-        "%d/%m/%Y",    # 12/05/2025
-        "%Y-%m-%d",    # 2025-05-12
-        "%d-%m-%Y",    # 12-05-2025
-        "%d %m %Y",    # 12 05 2025
-        "%d %B %Y",    # 12 Mayıs 2025
-        "%d %b %Y",    # 12 May 2025
-    ]
-
-    for fmt in SUPPORTED_DATE_FORMATS:
-        try:
-            date_obj = datetime.strptime(date_input, fmt)
-            if toString:
-                return date_obj.strftime("%Y-%m-%d")
-            else:
-                return date_obj
-        except ValueError:
-            continue
-
-    logger.warning(f"Geçersiz tarih formatı -> {date_input}")
-    return None
+    """Tarihi ISO formatına çevir."""
+    return parse_flexible_date(date_input, to_string=toString)
 
 def parse_jira_started(started: str) -> datetime:
     """JIRA formatındaki başlangıç zamanını datetime'a çevirme"""
@@ -103,25 +73,13 @@ def in_range(day: date, start_date: datetime, end_date: datetime) -> bool:
 # ===================== AKTİVASYON =====================
 
 def check_activation(key: str) -> Dict[str, Any]:
-    """
-    Aktivasyon kodunu kontrol et.
-    
-    Args:
-        key: Aktivasyon kodu
-    
-    Returns:
-        Dict: status (valid/expired/invalid) ve value (kalan gün sayısı)
-    """
-    pure_key = ConvertActivationCode(key)
-
-    if pure_key:
-        diff_key = CheckActivationStatus(pure_key)
-        if diff_key >= 0:        
-            return {"status": "valid", "value": diff_key}
-        else:
-            return {"status": "expired", "value": diff_key}
-    else:
-        return {"status": "invalid", "value": 0}
+    """Aktivasyon kodunu kontrol et."""
+    result = check_activation_status(
+        key=key,
+        convert_code=ConvertActivationCode,
+        check_status=CheckActivationStatus,
+    )
+    return result.to_dict()
 
 # ----- Worker Thread -----
 
@@ -162,47 +120,9 @@ class WorklogWorker(QThread):
         """İşlemi iptal et"""
         self._cancel = True
 
-    def _parse_hour_time(self, hour_str: str) -> tuple:
-        """
-        Saati parse et. xx:xx veya xx.xx formatlarını kabul et.
-        Örn: 9:30, 9.30, 14:45, 14.45
-        
-        Returns:
-            (hour, minute) tuple
-        """
-        try:
-            hour_str = str(hour_str).strip()
-            
-            # Hem : hem . ayırıcıyı destekle
-            if ':' in hour_str:
-                parts = hour_str.split(':')
-            elif '.' in hour_str:
-                parts = hour_str.split('.')
-            else:
-                # Ayırıcı yoksa tam sayı olarak al
-                hour = int(float(hour_str))
-                return hour, 0
-            
-            if len(parts) == 2:
-                hour = int(parts[0])
-                minute = int(parts[1])
-                
-                # Validasyon
-                if not (0 <= hour <= 23):
-                    logger.warning(f"Geçersiz saat değeri: {hour_str} (saat 0-23 arasında olmalı)")
-                    return 0, 0
-                if not (0 <= minute <= 59):
-                    logger.warning(f"Geçersiz dakika değeri: {hour_str} (dakika 0-59 arasında olmalı)")
-                    return 0, 0
-                
-                return hour, minute
-            else:
-                logger.warning(f"Geçersiz saat formatı: {hour_str}")
-                return 0, 0
-                
-        except (ValueError, AttributeError) as e:
-            logger.warning(f"Saat parse hatası: {hour_str} - {e}")
-            return 0, 0
+    def _parse_hour_time(self, hour_str: str) -> tuple[int, int]:
+        """Saati parse et ve (hour, minute) döndür."""
+        return parse_hour_minute(hour_str)
 
     def _setup_jira_connection(self) -> Optional[JIRA]:
         """Jira bağlantısını kur ve doğrula"""
