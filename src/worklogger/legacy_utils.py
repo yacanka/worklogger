@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Callable
+from typing import Callable, Dict, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 ISO_DATE_FORMAT = "%Y-%m-%d"
@@ -40,15 +40,15 @@ class ActivationResult:
     status: ActivationState
     value: int
 
-    def to_dict(self) -> dict[str, int | str]:
+    def to_dict(self) -> Dict[str, Union[int, str]]:
         """Return dict payload compatible with existing GUI flow."""
         return {"status": self.status.value, "value": self.value}
 
 
 def parse_flexible_date(
-    date_input: str | datetime,
+    date_input: Union[str, datetime],
     to_string: bool = True,
-) -> datetime | str | None:
+) -> Optional[Union[datetime, str]]:
     """Parse supported date values and return normalized output."""
     if isinstance(date_input, datetime):
         return date_input.strftime(ISO_DATE_FORMAT) if to_string else date_input
@@ -78,7 +78,7 @@ def parse_hour_minute(hour_value: object) -> tuple[int, int]:
     return (hour, minute) if _is_valid_time(hour, minute) else (HOUR_MIN, MINUTE_MIN)
 
 
-def _split_time_parts(normalized_value: str) -> tuple[str, str] | None:
+def _split_time_parts(normalized_value: str) -> Optional[Tuple[str, str]]:
     if ":" in normalized_value:
         parts = normalized_value.split(":")
         return (parts[0], parts[1]) if len(parts) == 2 else None
@@ -97,7 +97,7 @@ def _is_valid_time(hour: int, minute: int) -> bool:
 
 def check_activation_status(
     key: str,
-    convert_code: Callable[[str], str | None],
+    convert_code: Callable[[str], Optional[str]],
     check_status: Callable[[str], int],
 ) -> ActivationResult:
     """Evaluate activation key using injected conversion/status functions."""

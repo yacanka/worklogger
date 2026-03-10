@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from typing import Optional
 from datetime import datetime
 
 from jira import JIRA
@@ -77,7 +78,7 @@ class WorklogService:
     def iter_worklogs(
         self,
         issue_keys: Iterable[str],
-        author_account_id: str | None = None,
+        author_account_id: Optional[str] = None,
     ) -> Iterator[ExistingWorklog]:
         """Yield worklogs lazily for provided issues."""
         for issue_key in issue_keys:
