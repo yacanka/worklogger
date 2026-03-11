@@ -30,6 +30,7 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from worklogger.legacy_utils import check_activation_status, parse_flexible_date, parse_hour_minute
+from worklogger.jira_checks import extract_issue_keys, summarize_worklogs_by_day
 
 # ----- Logging Setup -----
 logging.basicConfig(
@@ -808,7 +809,7 @@ class MainWindow(QtWidgets.QWidget):
         self._setup_table_group()
 
         # İnfo label
-        self.infoLabel = QtWidgets.QLabel("Tabloya veri girin ve başlat butonuna tıklayın.")
+        self.infoLabel = QtWidgets.QLabel("Kontrol et ile issue/worklog özeti alabilir veya başlat ile işlem yapabilirsiniz.")
         self.infoLabel.setStyleSheet("color:#555; font-size: 12px;")
         self.infoLabel.setMaximumHeight(20)
 
@@ -839,6 +840,7 @@ class MainWindow(QtWidgets.QWidget):
         left_layout.addWidget(self.infoLabel, stretch=0, alignment=QtCore.Qt.AlignBottom)
 
         btn_layout = QtWidgets.QHBoxLayout()
+        btn_layout.addWidget(self.checkBtn)
         btn_layout.addWidget(self.startBtn)
         btn_layout.addWidget(self.cancelBtn)
         left_layout.addLayout(btn_layout)
@@ -1042,6 +1044,10 @@ class MainWindow(QtWidgets.QWidget):
 
     def _setup_buttons(self):
         """Butonları oluştur"""
+        self.checkBtn = QtWidgets.QPushButton("🔎 Kontrol Et")
+        self.checkBtn.setEnabled(True)
+        self.checkBtn.setCursor(QtCore.Qt.PointingHandCursor)
+
         self.startBtn = QtWidgets.QPushButton("▶ Başlat")
         self.startBtn.setEnabled(True)
         self.startBtn.setCursor(QtCore.Qt.PointingHandCursor)
@@ -1087,6 +1093,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def _connect_signals(self):
         """Sinyal bağlantılarını kur"""
+        self.checkBtn.clicked.connect(self.check_assignee_issues)
         self.startBtn.clicked.connect(self.start_processing)
         self.cancelBtn.clicked.connect(self.cancel_processing)
         self.activation_edit.textChanged.connect(self.on_activation_change)
@@ -1196,6 +1203,87 @@ class MainWindow(QtWidgets.QWidget):
 
         return True
 
+    def check_assignee_issues(self):
+        """Assignee olduğum issue'ları kontrol et ve worklog özetini yaz."""
+        jira = self._create_jira_client()
+        if not jira:
+            return
+        self.log.clear()
+        self.append_log("🔎 Uygun issue'lar sorgulanıyor...")
+        try:
+            me = jira.myself()
+            issues = self._fetch_filtered_issues(jira)
+            issue_keys = extract_issue_keys(issues)
+            self._append_worklog_daily_summary(jira, issue_keys, me)
+            self._populate_table_if_empty(issue_keys)
+            self.append_log(f"✓ Eşleşen issue sayısı: {len(issue_keys)}")
+        except Exception as exc:
+            logger.error(f"Kontrol işlemi hatası: {exc}", exc_info=True)
+            self.append_log(f"❌ Kontrol işlemi başarısız: {exc}")
+
+    def _fetch_filtered_issues(self, jira: JIRA) -> list:
+        """Kriterlere uyan issue'ları getir."""
+        jql = (
+            'assignee = currentUser() AND issuetype = Sub-task '
+            'AND status = "In Progress" AND duedate > startOfDay()'
+        )
+        return jira.search_issues(jql, maxResults=300)
+
+    def _append_worklog_daily_summary(self, jira: JIRA, issue_keys: list, me: Dict[str, Any]):
+        """Issue workloglarını gün bazında log'a yaz."""
+        author_ids = {
+            str(me.get("accountId", "")).strip(),
+            str(me.get("key", "")).strip(),
+            str(me.get("name", "")).strip(),
+        }
+        all_worklogs = self._collect_issue_worklogs(jira, issue_keys)
+        daily_totals = summarize_worklogs_by_day(all_worklogs, author_ids=author_ids)
+        if not daily_totals:
+            self.append_log("ℹ Kriterlere uygun kendi worklog kaydı bulunamadı.")
+            return
+        for day_key, hour_total in daily_totals.items():
+            self.append_log(f"🗓 {day_key}: {hour_total:.2f} saat")
+
+    def _collect_issue_worklogs(self, jira: JIRA, issue_keys: list) -> list:
+        """Issue listesindeki tüm worklog kayıtlarını topla."""
+        records = []
+        for issue_key in issue_keys:
+            try:
+                records.extend(jira.worklogs(issue_key))
+            except Exception as exc:
+                logger.warning(f"Worklog alınamadı {issue_key}: {exc}")
+                self.append_log(f"⚠ {issue_key} için worklog okunamadı")
+        return records
+
+    def _populate_table_if_empty(self, issue_keys: list):
+        """Tablo boşsa issue key listesini tabloya doldur."""
+        if not issue_keys:
+            return
+        if not self.dataTable.get_data_as_dataframe().empty:
+            return
+        issue_df = pd.DataFrame({"issueKey": issue_keys})
+        self.dataTable.load_from_dataframe(issue_df)
+        self.append_log("✓ Tablo boş olduğu için issue key'ler tabloya eklendi.")
+
+    def _create_jira_client(self) -> Optional[JIRA]:
+        """UI kimlik bilgileri ile Jira client oluştur."""
+        try:
+            options = {"server": self.jira_server.text().strip(), "verify": False}
+            if self.use_jsession_checkbox.isChecked():
+                jira = JIRA(options=options, get_server_info=False)
+                jira._session.cookies.set("JSESSIONID", self.sessionId.text().strip())
+                jira._session.headers.update({"Accept": "application/json"})
+                return jira
+            return JIRA(
+                options=options,
+                basic_auth=(self.username.text().strip(), self.password.text()),
+                get_server_info=False,
+            )
+        except Exception as exc:
+            logger.error(f"Jira bağlantısı kurulamadı: {exc}")
+            self.append_log(f"❌ Jira bağlantısı kurulamadı: {exc}")
+            return None
+
     def start_processing(self):
         """İşlemi başlat"""
         if not self._validate_inputs():
@@ -1286,6 +1374,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def _set_running_state(self, running: bool):
         """Çalışma durumunu ayarla"""
+        self.checkBtn.setEnabled(not running)
         self.startBtn.setEnabled(not running)
         self.cancelBtn.setEnabled(running)
         self.dataTable.setEnabled(not running)
