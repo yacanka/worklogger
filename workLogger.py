@@ -155,7 +155,7 @@ class WorklogWorker(QThread):
                 jira = JIRA(
                     options={"server": self.jira_server, "verify": cert},
                     basic_auth=(self.username, self.password),
-                    get_server_info=False
+                    get_server_info=True
                 )
 
             return jira
@@ -1047,8 +1047,24 @@ class MainWindow(QtWidgets.QWidget):
         self.checkBtn = QtWidgets.QPushButton("🔎 Kontrol Et")
         self.checkBtn.setEnabled(True)
         self.checkBtn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.checkBtn.setStyleSheet("""
+            QPushButton {
+                background-color: #19A0FF;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #168CDE;
+            }
+            QPushButton:pressed {
+                background-color: #1272B5;
+            }
+        """)
 
-        self.startBtn = QtWidgets.QPushButton("▶ Başlat")
+        self.startBtn = QtWidgets.QPushButton("▶️ Başlat")
         self.startBtn.setEnabled(True)
         self.startBtn.setCursor(QtCore.Qt.PointingHandCursor)
         self.startBtn.setStyleSheet("""
@@ -1068,7 +1084,7 @@ class MainWindow(QtWidgets.QWidget):
             }
         """)
 
-        self.cancelBtn = QtWidgets.QPushButton("⏹ İptal")
+        self.cancelBtn = QtWidgets.QPushButton("⛔ İptal")
         self.cancelBtn.setEnabled(False)
         self.cancelBtn.setCursor(QtCore.Qt.PointingHandCursor)
         self.cancelBtn.setStyleSheet("""
@@ -1214,9 +1230,9 @@ class MainWindow(QtWidgets.QWidget):
             me = jira.myself()
             issues = self._fetch_filtered_issues(jira)
             issue_keys = extract_issue_keys(issues)
+            self._suggest_issue_key(issue_keys)
             self._append_worklog_daily_summary(jira, issue_keys, me)
             self._populate_table_if_empty(issue_keys)
-            self.append_log(f"✓ Eşleşen issue sayısı: {len(issue_keys)}")
         except Exception as exc:
             logger.error(f"Kontrol işlemi hatası: {exc}", exc_info=True)
             self.append_log(f"❌ Kontrol işlemi başarısız: {exc}")
@@ -1229,20 +1245,28 @@ class MainWindow(QtWidgets.QWidget):
         )
         return jira.search_issues(jql, maxResults=300)
 
+    def _suggest_issue_key(self, issue_keys: list) -> None:
+        self.append_log(f"Eşleşen issue sayısı: {len(issue_keys)}")
+        for issue_key in issue_keys:
+            self.append_log(f"✓ {issue_key}")
+
     def _append_worklog_daily_summary(self, jira: JIRA, issue_keys: list, me: Dict[str, Any]):
         """Issue workloglarını gün bazında log'a yaz."""
+        self.append_log("\n🗓 Worklog takvimi inceleniyor...")
         author_ids = {
             str(me.get("accountId", "")).strip(),
             str(me.get("key", "")).strip(),
             str(me.get("name", "")).strip(),
         }
         all_worklogs = self._collect_issue_worklogs(jira, issue_keys)
-        daily_totals = summarize_worklogs_by_day(all_worklogs, author_ids=author_ids)
+        daily_totals = summarize_worklogs_by_day(all_worklogs, (self.startDate.text().strip(), self.endDate.text().strip()), author_ids=author_ids)
         if not daily_totals:
             self.append_log("ℹ Kriterlere uygun kendi worklog kaydı bulunamadı.")
+            self.append_log("ℹ Kriterler:\n - assignee = currentUser()\n - issuetype = Sub-task\n - status = In Progress\n - duedate > startOfDay()")
             return
         for day_key, hour_total in daily_totals.items():
-            self.append_log(f"🗓 {day_key}: {hour_total:.2f} saat")
+            status_icon = "🔴" if hour_total <= 0 else "🟡" if hour_total < 8 else "🟢" if hour_total == 8 else "🔵"
+            self.append_log(f"{status_icon} {day_key}: {hour_total:.2f} saat")
 
     def _collect_issue_worklogs(self, jira: JIRA, issue_keys: list) -> list:
         """Issue listesindeki tüm worklog kayıtlarını topla."""
@@ -1268,16 +1292,20 @@ class MainWindow(QtWidgets.QWidget):
     def _create_jira_client(self) -> Optional[JIRA]:
         """UI kimlik bilgileri ile Jira client oluştur."""
         try:
-            options = {"server": self.jira_server.text().strip(), "verify": False}
+            cert = False
+            if os.path.exists(resource_path("JIRA_Chain.crt")):
+                cert = resource_path("JIRA_Chain.crt")
+            
+            options = {"server": self.jira_server.text().strip(), "verify": cert}
             if self.use_jsession_checkbox.isChecked():
                 jira = JIRA(options=options, get_server_info=False)
-                jira._session.cookies.set("JSESSIONID", self.sessionId.text().strip())
+                jira._session.cookies.set("JSESSIONID", self.sessionId.text().strip(), domain=urlparse(self.jira_server).netloc, path="/")
                 jira._session.headers.update({"Accept": "application/json"})
                 return jira
             return JIRA(
                 options=options,
                 basic_auth=(self.username.text().strip(), self.password.text()),
-                get_server_info=False,
+                get_server_info=True,
             )
         except Exception as exc:
             logger.error(f"Jira bağlantısı kurulamadı: {exc}")
@@ -1362,10 +1390,10 @@ class MainWindow(QtWidgets.QWidget):
     def on_worker_finished(self, ok: int, fail: int):
         """Worker bittiğinde"""
         total = ok + fail
-        self.append_log(f"\n{'='*50}")
+        self.append_log(f"\n{'='*10}")
         self.append_log(f"✓ Başarılı: {ok}/{total}")
         self.append_log(f"✗ Başarısız: {fail}/{total}")
-        self.append_log(f"{'='*50}")
+        self.append_log(f"{'='*10}\n")
         self.infoLabel.setText(f"✓ Tamamlandı: {ok} başarılı, {fail} başarısız")
         self._set_running_state(False)
         logger.info(f"İşlem tamamlandı: {ok} başarılı, {fail} başarısız")
