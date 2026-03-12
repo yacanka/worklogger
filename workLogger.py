@@ -1195,7 +1195,7 @@ class MainWindow(QtWidgets.QWidget):
                 background-color: #a93226;
             }
             QPushButton:disabled {
-                background-color: #bdc3c7;
+                background-color: #C78D8E;
             }
         """)
 
