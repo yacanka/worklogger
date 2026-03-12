@@ -399,6 +399,97 @@ class WorklogWorker(QThread):
             self.errorSignal.emit(f"Kritik hata: {str(e)}")
 
 
+class AssigneeIssueCheckWorker(QThread):
+    """Assignee issue kontrolü ve worklog özeti için worker thread."""
+
+    statusSignal = pyqtSignal(str)
+    errorSignal = pyqtSignal(str)
+    finishedSignal = pyqtSignal(object)
+
+    def __init__(
+        self,
+        jira_server: str,
+        jsession_id: str,
+        username: str,
+        password: str,
+        start_date: str,
+        end_date: str,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.jira_server = jira_server
+        self.jsession_id = jsession_id
+        self.username = username
+        self.password = password
+        self.start_date = start_date
+        self.end_date = end_date
+
+    def _create_jira_client(self) -> JIRA:
+        cert = False
+        if os.path.exists(resource_path("JIRA_Chain.crt")):
+            cert = resource_path("JIRA_Chain.crt")
+        options = {"server": self.jira_server, "verify": cert}
+        if self.jsession_id:
+            jira = JIRA(options=options, get_server_info=False)
+            jira._session.cookies.set(
+                "JSESSIONID",
+                self.jsession_id,
+                domain=urlparse(self.jira_server).netloc,
+                path="/",
+            )
+            jira._session.headers.update({"Accept": "application/json"})
+            return jira
+        return JIRA(options=options, basic_auth=(self.username, self.password), get_server_info=True)
+
+    def _fetch_filtered_issues(self, jira: JIRA) -> list:
+        jql = (
+            'assignee = currentUser() AND issuetype = Sub-task '
+            'AND status = "In Progress" AND duedate > startOfDay()'
+        )
+        return jira.search_issues(jql, maxResults=300)
+
+    def _collect_issue_worklogs(self, jira: JIRA, issue_keys: list) -> tuple[list, list]:
+        worklogs = []
+        warnings = []
+        for issue_key in issue_keys:
+            try:
+                worklogs.extend(jira.worklogs(issue_key))
+            except Exception as exc:
+                logger.warning(f"Worklog alınamadı {issue_key}: {exc}")
+                warnings.append(f"⚠ {issue_key} için worklog okunamadı")
+        return worklogs, warnings
+
+    def run(self):
+        try:
+            self.statusSignal.emit("🔎 Uygun issue'lar sorgulanıyor...")
+            jira = self._create_jira_client()
+            me = jira.myself()
+            issues = self._fetch_filtered_issues(jira)
+            issue_keys = extract_issue_keys(issues)
+            self.statusSignal.emit("🗓 Worklog takvimi inceleniyor...")
+            worklogs, warnings = self._collect_issue_worklogs(jira, issue_keys)
+            author_ids = {
+                str(me.get("accountId", "")).strip(),
+                str(me.get("key", "")).strip(),
+                str(me.get("name", "")).strip(),
+            }
+            daily_totals = summarize_worklogs_by_day(
+                worklogs,
+                (self.start_date, self.end_date),
+                author_ids=author_ids,
+            )
+            self.finishedSignal.emit(
+                {
+                    "issue_keys": issue_keys,
+                    "daily_totals": daily_totals,
+                    "warnings": warnings,
+                }
+            )
+        except Exception as exc:
+            logger.error(f"Kontrol işlemi hatası: {exc}", exc_info=True)
+            self.errorSignal.emit(f"Kontrol işlemi başarısız: {exc}")
+
+
 # ---------- UI ----------
 
 class MultilineTableDelegate(QtWidgets.QStyledItemDelegate):
@@ -866,6 +957,7 @@ class MainWindow(QtWidgets.QWidget):
 
         # State
         self.worker: Optional[WorklogWorker] = None
+        self.check_worker: Optional[AssigneeIssueCheckWorker] = None
         # Cache to preserve full table data when switching modes
         self._saved_table_data: Optional[pd.DataFrame] = None
 
@@ -1221,45 +1313,34 @@ class MainWindow(QtWidgets.QWidget):
 
     def check_assignee_issues(self):
         """Assignee olduğum issue'ları kontrol et ve worklog özetini yaz."""
-        jira = self._create_jira_client()
-        if not jira:
-            return
         self.log.clear()
-        self.append_log("🔎 Uygun issue'lar sorgulanıyor...")
-        try:
-            me = jira.myself()
-            issues = self._fetch_filtered_issues(jira)
-            issue_keys = extract_issue_keys(issues)
-            self._suggest_issue_key(issue_keys)
-            self._append_worklog_daily_summary(jira, issue_keys, me)
-            self._populate_table_if_empty(issue_keys)
-        except Exception as exc:
-            logger.error(f"Kontrol işlemi hatası: {exc}", exc_info=True)
-            self.append_log(f"❌ Kontrol işlemi başarısız: {exc}")
+        self.progress.setValue(0)
+        self._set_running_state(True)
 
-    def _fetch_filtered_issues(self, jira: JIRA) -> list:
-        """Kriterlere uyan issue'ları getir."""
-        jql = (
-            'assignee = currentUser() AND issuetype = Sub-task '
-            'AND status = "In Progress" AND duedate > startOfDay()'
+        jsession_id = self.sessionId.text() if self.use_jsession_checkbox.isChecked() else ""
+        username = "" if jsession_id else self.username.text()
+        password = "" if jsession_id else self.password.text()
+        self.check_worker = AssigneeIssueCheckWorker(
+            jira_server=self.jira_server.text().strip(),
+            jsession_id=jsession_id,
+            username=username,
+            password=password,
+            start_date=self.startDate.text().strip(),
+            end_date=self.endDate.text().strip(),
         )
-        return jira.search_issues(jql, maxResults=300)
+        self.check_worker.statusSignal.connect(self.append_log)
+        self.check_worker.errorSignal.connect(self.on_check_worker_error)
+        self.check_worker.finishedSignal.connect(self.on_check_worker_finished)
+        self.check_worker.finished.connect(self.on_check_worker_thread_finished)
+        self.check_worker.start()
 
     def _suggest_issue_key(self, issue_keys: list) -> None:
         self.append_log(f"Eşleşen issue sayısı: {len(issue_keys)}")
         for issue_key in issue_keys:
             self.append_log(f"✓ {issue_key}")
 
-    def _append_worklog_daily_summary(self, jira: JIRA, issue_keys: list, me: Dict[str, Any]):
+    def _append_worklog_daily_summary(self, daily_totals: Dict[str, float]):
         """Issue workloglarını gün bazında log'a yaz."""
-        self.append_log("\n🗓 Worklog takvimi inceleniyor...")
-        author_ids = {
-            str(me.get("accountId", "")).strip(),
-            str(me.get("key", "")).strip(),
-            str(me.get("name", "")).strip(),
-        }
-        all_worklogs = self._collect_issue_worklogs(jira, issue_keys)
-        daily_totals = summarize_worklogs_by_day(all_worklogs, (self.startDate.text().strip(), self.endDate.text().strip()), author_ids=author_ids)
         if not daily_totals:
             self.append_log("ℹ Kriterlere uygun kendi worklog kaydı bulunamadı.")
             self.append_log("ℹ Kriterler:\n - assignee = currentUser()\n - issuetype = Sub-task\n - status = In Progress\n - duedate > startOfDay()")
@@ -1267,17 +1348,6 @@ class MainWindow(QtWidgets.QWidget):
         for day_key, hour_total in daily_totals.items():
             status_icon = "🔴" if hour_total <= 0 else "🟡" if hour_total < 8 else "🟢" if hour_total == 8 else "🔵"
             self.append_log(f"{status_icon} {day_key}: {hour_total:.2f} saat")
-
-    def _collect_issue_worklogs(self, jira: JIRA, issue_keys: list) -> list:
-        """Issue listesindeki tüm worklog kayıtlarını topla."""
-        records = []
-        for issue_key in issue_keys:
-            try:
-                records.extend(jira.worklogs(issue_key))
-            except Exception as exc:
-                logger.warning(f"Worklog alınamadı {issue_key}: {exc}")
-                self.append_log(f"⚠ {issue_key} için worklog okunamadı")
-        return records
 
     def _populate_table_if_empty(self, issue_keys: list):
         """Tablo boşsa issue key listesini tabloya doldur."""
@@ -1289,28 +1359,25 @@ class MainWindow(QtWidgets.QWidget):
         self.dataTable.load_from_dataframe(issue_df)
         self.append_log("✓ Tablo boş olduğu için issue key'ler tabloya eklendi.")
 
-    def _create_jira_client(self) -> Optional[JIRA]:
-        """UI kimlik bilgileri ile Jira client oluştur."""
-        try:
-            cert = False
-            if os.path.exists(resource_path("JIRA_Chain.crt")):
-                cert = resource_path("JIRA_Chain.crt")
-            
-            options = {"server": self.jira_server.text().strip(), "verify": cert}
-            if self.use_jsession_checkbox.isChecked():
-                jira = JIRA(options=options, get_server_info=False)
-                jira._session.cookies.set("JSESSIONID", self.sessionId.text().strip(), domain=urlparse(self.jira_server).netloc, path="/")
-                jira._session.headers.update({"Accept": "application/json"})
-                return jira
-            return JIRA(
-                options=options,
-                basic_auth=(self.username.text().strip(), self.password.text()),
-                get_server_info=True,
-            )
-        except Exception as exc:
-            logger.error(f"Jira bağlantısı kurulamadı: {exc}")
-            self.append_log(f"❌ Jira bağlantısı kurulamadı: {exc}")
-            return None
+    def on_check_worker_error(self, err: str):
+        """Kontrol worker hata verdiğinde."""
+        self.append_log(f"❌ {err}")
+
+    def on_check_worker_finished(self, result: Dict[str, Any]):
+        """Kontrol worker tamamlandığında sonuçları logla."""
+        issue_keys = result.get("issue_keys", [])
+        daily_totals = result.get("daily_totals", {})
+        for warning_msg in result.get("warnings", []):
+            self.append_log(warning_msg)
+        self._suggest_issue_key(issue_keys)
+        self._append_worklog_daily_summary(daily_totals)
+        self._populate_table_if_empty(issue_keys)
+        self.progress.setValue(100)
+
+    def on_check_worker_thread_finished(self):
+        """Kontrol worker thread'i bittiğinde UI durumunu sıfırla."""
+        self._set_running_state(False)
+        self.check_worker = None
 
     def start_processing(self):
         """İşlemi başlat"""
