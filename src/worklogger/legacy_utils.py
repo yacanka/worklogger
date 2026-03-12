@@ -33,7 +33,7 @@ class ActivationState(str, Enum):
     INVALID = "invalid"
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(frozen=True)
 class ActivationResult:
     """Activation result payload used by the legacy GUI code."""
 

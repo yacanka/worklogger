@@ -15,7 +15,7 @@ class WorklogAction(str, Enum):
     LIST = "list"
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(frozen=True)
 class WorklogEntry:
     """Represents a normalized worklog request payload.
 
@@ -32,7 +32,7 @@ class WorklogEntry:
     comment: str = ""
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(frozen=True)
 class ExistingWorklog:
     """Represents a worklog record returned by Jira."""
 

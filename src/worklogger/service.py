@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 MIN_ISSUE_KEY_PARTS = 2
 
 
-@dataclass(slots=True)
+@dataclass()
 class JiraCredentials:
     """Authentication payload for Jira client."""
 
