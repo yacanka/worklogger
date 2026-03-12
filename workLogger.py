@@ -25,6 +25,12 @@ from jira.exceptions import JIRAError
 
 # activation
 from Activation import ConvertActivationCode, CheckActivationStatus
+SRC_PATH = Path(__file__).resolve().parent / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
+
+from worklogger.legacy_utils import check_activation_status, parse_flexible_date, parse_hour_minute
+from worklogger.jira_checks import extract_issue_keys, summarize_worklogs_by_day
 
 # ----- Logging Setup -----
 logging.basicConfig(
@@ -53,43 +59,8 @@ def resource_path(relative_path):
 # ------------ Convert -------------
 
 def date_to_iso_date(date_input: Union[str, datetime], toString: bool = True) -> Optional[Union[datetime, str]]:
-    """
-    Tarihi ISO formatına çevirme. Birden fazla format destekler.
-    
-    Args:
-        date_input: Tarih nesnesi veya string
-        toString: True ise string döner, False ise datetime
-    
-    Returns:
-        ISO format tarih veya datetime nesnesi
-    """
-    if isinstance(date_input, datetime):
-        if toString:
-            return str(date_input.date())
-        return date_input
-    
-    SUPPORTED_DATE_FORMATS = [
-        "%d.%m.%Y",    # 12.05.2025
-        "%d/%m/%Y",    # 12/05/2025
-        "%Y-%m-%d",    # 2025-05-12
-        "%d-%m-%Y",    # 12-05-2025
-        "%d %m %Y",    # 12 05 2025
-        "%d %B %Y",    # 12 Mayıs 2025
-        "%d %b %Y",    # 12 May 2025
-    ]
-
-    for fmt in SUPPORTED_DATE_FORMATS:
-        try:
-            date_obj = datetime.strptime(date_input, fmt)
-            if toString:
-                return date_obj.strftime("%Y-%m-%d")
-            else:
-                return date_obj
-        except ValueError:
-            continue
-
-    logger.warning(f"Geçersiz tarih formatı -> {date_input}")
-    return None
+    """Tarihi ISO formatına çevir."""
+    return parse_flexible_date(date_input, to_string=toString)
 
 def parse_jira_started(started: str) -> datetime:
     """JIRA formatındaki başlangıç zamanını datetime'a çevirme"""
@@ -103,25 +74,13 @@ def in_range(day: date, start_date: datetime, end_date: datetime) -> bool:
 # ===================== AKTİVASYON =====================
 
 def check_activation(key: str) -> Dict[str, Any]:
-    """
-    Aktivasyon kodunu kontrol et.
-    
-    Args:
-        key: Aktivasyon kodu
-    
-    Returns:
-        Dict: status (valid/expired/invalid) ve value (kalan gün sayısı)
-    """
-    pure_key = ConvertActivationCode(key)
-
-    if pure_key:
-        diff_key = CheckActivationStatus(pure_key)
-        if diff_key >= 0:        
-            return {"status": "valid", "value": diff_key}
-        else:
-            return {"status": "expired", "value": diff_key}
-    else:
-        return {"status": "invalid", "value": 0}
+    """Aktivasyon kodunu kontrol et."""
+    result = check_activation_status(
+        key=key,
+        convert_code=ConvertActivationCode,
+        check_status=CheckActivationStatus,
+    )
+    return result.to_dict()
 
 # ----- Worker Thread -----
 
@@ -162,47 +121,9 @@ class WorklogWorker(QThread):
         """İşlemi iptal et"""
         self._cancel = True
 
-    def _parse_hour_time(self, hour_str: str) -> tuple:
-        """
-        Saati parse et. xx:xx veya xx.xx formatlarını kabul et.
-        Örn: 9:30, 9.30, 14:45, 14.45
-        
-        Returns:
-            (hour, minute) tuple
-        """
-        try:
-            hour_str = str(hour_str).strip()
-            
-            # Hem : hem . ayırıcıyı destekle
-            if ':' in hour_str:
-                parts = hour_str.split(':')
-            elif '.' in hour_str:
-                parts = hour_str.split('.')
-            else:
-                # Ayırıcı yoksa tam sayı olarak al
-                hour = int(float(hour_str))
-                return hour, 0
-            
-            if len(parts) == 2:
-                hour = int(parts[0])
-                minute = int(parts[1])
-                
-                # Validasyon
-                if not (0 <= hour <= 23):
-                    logger.warning(f"Geçersiz saat değeri: {hour_str} (saat 0-23 arasında olmalı)")
-                    return 0, 0
-                if not (0 <= minute <= 59):
-                    logger.warning(f"Geçersiz dakika değeri: {hour_str} (dakika 0-59 arasında olmalı)")
-                    return 0, 0
-                
-                return hour, minute
-            else:
-                logger.warning(f"Geçersiz saat formatı: {hour_str}")
-                return 0, 0
-                
-        except (ValueError, AttributeError) as e:
-            logger.warning(f"Saat parse hatası: {hour_str} - {e}")
-            return 0, 0
+    def _parse_hour_time(self, hour_str: str) -> tuple[int, int]:
+        """Saati parse et ve (hour, minute) döndür."""
+        return parse_hour_minute(hour_str)
 
     def _setup_jira_connection(self) -> Optional[JIRA]:
         """Jira bağlantısını kur ve doğrula"""
@@ -234,7 +155,7 @@ class WorklogWorker(QThread):
                 jira = JIRA(
                     options={"server": self.jira_server, "verify": cert},
                     basic_auth=(self.username, self.password),
-                    get_server_info=False
+                    get_server_info=True
                 )
 
             return jira
@@ -888,7 +809,7 @@ class MainWindow(QtWidgets.QWidget):
         self._setup_table_group()
 
         # İnfo label
-        self.infoLabel = QtWidgets.QLabel("Tabloya veri girin ve başlat butonuna tıklayın.")
+        self.infoLabel = QtWidgets.QLabel("Kontrol et ile issue/worklog özeti alabilir veya başlat ile işlem yapabilirsiniz.")
         self.infoLabel.setStyleSheet("color:#555; font-size: 12px;")
         self.infoLabel.setMaximumHeight(20)
 
@@ -919,6 +840,7 @@ class MainWindow(QtWidgets.QWidget):
         left_layout.addWidget(self.infoLabel, stretch=0, alignment=QtCore.Qt.AlignBottom)
 
         btn_layout = QtWidgets.QHBoxLayout()
+        btn_layout.addWidget(self.checkBtn)
         btn_layout.addWidget(self.startBtn)
         btn_layout.addWidget(self.cancelBtn)
         left_layout.addLayout(btn_layout)
@@ -1122,7 +1044,27 @@ class MainWindow(QtWidgets.QWidget):
 
     def _setup_buttons(self):
         """Butonları oluştur"""
-        self.startBtn = QtWidgets.QPushButton("▶ Başlat")
+        self.checkBtn = QtWidgets.QPushButton("🔎 Kontrol Et")
+        self.checkBtn.setEnabled(True)
+        self.checkBtn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.checkBtn.setStyleSheet("""
+            QPushButton {
+                background-color: #19A0FF;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #168CDE;
+            }
+            QPushButton:pressed {
+                background-color: #1272B5;
+            }
+        """)
+
+        self.startBtn = QtWidgets.QPushButton("▶️ Başlat")
         self.startBtn.setEnabled(True)
         self.startBtn.setCursor(QtCore.Qt.PointingHandCursor)
         self.startBtn.setStyleSheet("""
@@ -1142,7 +1084,7 @@ class MainWindow(QtWidgets.QWidget):
             }
         """)
 
-        self.cancelBtn = QtWidgets.QPushButton("⏹ İptal")
+        self.cancelBtn = QtWidgets.QPushButton("⛔ İptal")
         self.cancelBtn.setEnabled(False)
         self.cancelBtn.setCursor(QtCore.Qt.PointingHandCursor)
         self.cancelBtn.setStyleSheet("""
@@ -1167,6 +1109,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def _connect_signals(self):
         """Sinyal bağlantılarını kur"""
+        self.checkBtn.clicked.connect(self.check_assignee_issues)
         self.startBtn.clicked.connect(self.start_processing)
         self.cancelBtn.clicked.connect(self.cancel_processing)
         self.activation_edit.textChanged.connect(self.on_activation_change)
@@ -1276,6 +1219,99 @@ class MainWindow(QtWidgets.QWidget):
 
         return True
 
+    def check_assignee_issues(self):
+        """Assignee olduğum issue'ları kontrol et ve worklog özetini yaz."""
+        jira = self._create_jira_client()
+        if not jira:
+            return
+        self.log.clear()
+        self.append_log("🔎 Uygun issue'lar sorgulanıyor...")
+        try:
+            me = jira.myself()
+            issues = self._fetch_filtered_issues(jira)
+            issue_keys = extract_issue_keys(issues)
+            self._suggest_issue_key(issue_keys)
+            self._append_worklog_daily_summary(jira, issue_keys, me)
+            self._populate_table_if_empty(issue_keys)
+        except Exception as exc:
+            logger.error(f"Kontrol işlemi hatası: {exc}", exc_info=True)
+            self.append_log(f"❌ Kontrol işlemi başarısız: {exc}")
+
+    def _fetch_filtered_issues(self, jira: JIRA) -> list:
+        """Kriterlere uyan issue'ları getir."""
+        jql = (
+            'assignee = currentUser() AND issuetype = Sub-task '
+            'AND status = "In Progress" AND duedate > startOfDay()'
+        )
+        return jira.search_issues(jql, maxResults=300)
+
+    def _suggest_issue_key(self, issue_keys: list) -> None:
+        self.append_log(f"Eşleşen issue sayısı: {len(issue_keys)}")
+        for issue_key in issue_keys:
+            self.append_log(f"✓ {issue_key}")
+
+    def _append_worklog_daily_summary(self, jira: JIRA, issue_keys: list, me: Dict[str, Any]):
+        """Issue workloglarını gün bazında log'a yaz."""
+        self.append_log("\n🗓 Worklog takvimi inceleniyor...")
+        author_ids = {
+            str(me.get("accountId", "")).strip(),
+            str(me.get("key", "")).strip(),
+            str(me.get("name", "")).strip(),
+        }
+        all_worklogs = self._collect_issue_worklogs(jira, issue_keys)
+        daily_totals = summarize_worklogs_by_day(all_worklogs, (self.startDate.text().strip(), self.endDate.text().strip()), author_ids=author_ids)
+        if not daily_totals:
+            self.append_log("ℹ Kriterlere uygun kendi worklog kaydı bulunamadı.")
+            self.append_log("ℹ Kriterler:\n - assignee = currentUser()\n - issuetype = Sub-task\n - status = In Progress\n - duedate > startOfDay()")
+            return
+        for day_key, hour_total in daily_totals.items():
+            status_icon = "🔴" if hour_total <= 0 else "🟡" if hour_total < 8 else "🟢" if hour_total == 8 else "🔵"
+            self.append_log(f"{status_icon} {day_key}: {hour_total:.2f} saat")
+
+    def _collect_issue_worklogs(self, jira: JIRA, issue_keys: list) -> list:
+        """Issue listesindeki tüm worklog kayıtlarını topla."""
+        records = []
+        for issue_key in issue_keys:
+            try:
+                records.extend(jira.worklogs(issue_key))
+            except Exception as exc:
+                logger.warning(f"Worklog alınamadı {issue_key}: {exc}")
+                self.append_log(f"⚠ {issue_key} için worklog okunamadı")
+        return records
+
+    def _populate_table_if_empty(self, issue_keys: list):
+        """Tablo boşsa issue key listesini tabloya doldur."""
+        if not issue_keys:
+            return
+        if not self.dataTable.get_data_as_dataframe().empty:
+            return
+        issue_df = pd.DataFrame({"issueKey": issue_keys})
+        self.dataTable.load_from_dataframe(issue_df)
+        self.append_log("✓ Tablo boş olduğu için issue key'ler tabloya eklendi.")
+
+    def _create_jira_client(self) -> Optional[JIRA]:
+        """UI kimlik bilgileri ile Jira client oluştur."""
+        try:
+            cert = False
+            if os.path.exists(resource_path("JIRA_Chain.crt")):
+                cert = resource_path("JIRA_Chain.crt")
+            
+            options = {"server": self.jira_server.text().strip(), "verify": cert}
+            if self.use_jsession_checkbox.isChecked():
+                jira = JIRA(options=options, get_server_info=False)
+                jira._session.cookies.set("JSESSIONID", self.sessionId.text().strip(), domain=urlparse(self.jira_server).netloc, path="/")
+                jira._session.headers.update({"Accept": "application/json"})
+                return jira
+            return JIRA(
+                options=options,
+                basic_auth=(self.username.text().strip(), self.password.text()),
+                get_server_info=True,
+            )
+        except Exception as exc:
+            logger.error(f"Jira bağlantısı kurulamadı: {exc}")
+            self.append_log(f"❌ Jira bağlantısı kurulamadı: {exc}")
+            return None
+
     def start_processing(self):
         """İşlemi başlat"""
         if not self._validate_inputs():
@@ -1354,10 +1390,10 @@ class MainWindow(QtWidgets.QWidget):
     def on_worker_finished(self, ok: int, fail: int):
         """Worker bittiğinde"""
         total = ok + fail
-        self.append_log(f"\n{'='*50}")
+        self.append_log(f"\n{'='*10}")
         self.append_log(f"✓ Başarılı: {ok}/{total}")
         self.append_log(f"✗ Başarısız: {fail}/{total}")
-        self.append_log(f"{'='*50}")
+        self.append_log(f"{'='*10}\n")
         self.infoLabel.setText(f"✓ Tamamlandı: {ok} başarılı, {fail} başarısız")
         self._set_running_state(False)
         logger.info(f"İşlem tamamlandı: {ok} başarılı, {fail} başarısız")
@@ -1366,6 +1402,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def _set_running_state(self, running: bool):
         """Çalışma durumunu ayarla"""
+        self.checkBtn.setEnabled(not running)
         self.startBtn.setEnabled(not running)
         self.cancelBtn.setEnabled(running)
         self.dataTable.setEnabled(not running)
