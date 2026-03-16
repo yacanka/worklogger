@@ -31,6 +31,11 @@ if str(SRC_PATH) not in sys.path:
 
 from worklogger.legacy_utils import check_activation_status, parse_flexible_date, parse_hour_minute
 from worklogger.jira_checks import extract_issue_keys, summarize_worklogs_by_day
+from worklogger.jira_errors import (
+    build_auth_message,
+    build_jira_connection_error,
+    build_missing_fields_message,
+)
 
 # ----- Logging Setup -----
 logging.basicConfig(
@@ -137,6 +142,7 @@ class WorklogWorker(QThread):
 
     def _setup_jira_connection(self) -> Optional[JIRA]:
         """Jira bağlantısını kur ve doğrula"""
+        using_session = bool(self.jsession_id.strip())
         try:
             cert = False
             if os.path.exists(resource_path("JIRA_Chain.crt")):
@@ -144,7 +150,7 @@ class WorklogWorker(QThread):
 
             # JSESSIONID varsa, token ile; yoksa username/password ile bağlan
             options = {"server": self.jira_server, "verify": cert}
-            if self.jsession_id:
+            if using_session:
                 jira = JIRA(
                     options=options,
                     get_server_info=False
@@ -171,8 +177,8 @@ class WorklogWorker(QThread):
 
             return jira
         except JIRAError as e:
-            logger.error(f"Jira bağlantısı kurulamadı: {e}")
-            self.errorSignal.emit(f"Jira bağlantı hatası: {parse_JIRA_error(e)}")
+            logger.error("Jira bağlantısı kurulamadı: %s", e)
+            self.errorSignal.emit(build_jira_connection_error(e, using_session))
             return None
         except Exception as e:
             logger.error(f"Jira bağlantısı sırasında bir hata oluştu: {e}")
@@ -385,9 +391,13 @@ class WorklogWorker(QThread):
                 if not my_account_id:
                     raise RuntimeError("Kullanıcı hesap ID'si alınamadı.")
                 self.statusSignal.emit(f"{me.get('displayName')} olarak bağlandı.")
+            except JIRAError as e:
+                logger.error(f"Kullanıcı bilgisi hatası: {e}")
+                self.errorSignal.emit(build_jira_connection_error(e, bool(self.jsession_id.strip())))
+                return
             except Exception as e:
                 logger.error(f"Kullanıcı bilgisi hatası: {e}")
-                self.errorSignal.emit("JSESSIONID geçersiz. Bağlantı kurulamadı.")
+                self.errorSignal.emit(build_auth_message(bool(self.jsession_id.strip())))
                 return
 
             # Tarih aralığını ayrıştır
@@ -439,7 +449,8 @@ class AssigneeIssueCheckWorker(QThread):
         self.start_date = start_date
         self.end_date = end_date
 
-    def _setup_jira_connection(self) -> JIRA:
+    def _setup_jira_connection(self) -> Optional[JIRA]:
+        using_session = bool(self.jsession_id.strip())
         try:
             cert = False
             if os.path.exists(resource_path("JIRA_Chain.crt")):
@@ -447,7 +458,7 @@ class AssigneeIssueCheckWorker(QThread):
 
             # JSESSIONID varsa, token ile; yoksa username/password ile bağlan
             options = {"server": self.jira_server, "verify": cert}
-            if self.jsession_id:
+            if using_session:
                 jira = JIRA(
                     options=options,
                     get_server_info=False
@@ -473,6 +484,10 @@ class AssigneeIssueCheckWorker(QThread):
                 )
 
             return jira
+        except JIRAError as e:
+            logger.error("Jira bağlantısı kurulamadı: %s", e)
+            self.errorSignal.emit(build_jira_connection_error(e, using_session))
+            return None
         except Exception as e:
             logger.error(f"Jira bağlantısı kurulamadı: {e}")
             self.errorSignal.emit(f"Jira bağlantı hatası: {str(e)}")
@@ -500,6 +515,8 @@ class AssigneeIssueCheckWorker(QThread):
         try:
             self.statusSignal.emit("🔎 Uygun issue'lar sorgulanıyor...")
             jira = self._setup_jira_connection()
+            if jira is None:
+                return
             me = jira.myself()
             issues = self._fetch_filtered_issues(jira)
             issue_keys = extract_issue_keys(issues)
@@ -1319,25 +1336,28 @@ class MainWindow(QtWidgets.QWidget):
 
     def _validate_inputs(self) -> bool:
         """İnput doğrulaması"""
-        errors = []
+        missing_fields = []
 
         if not self.jira_server.text().strip():
-            errors.append("JIRA sunucusu boş.")
+            missing_fields.append("Jira Server")
 
         # Authentication doğrulaması
         if self.use_jsession_checkbox.isChecked():
             if not self.sessionId.text().strip():
-                errors.append("JSESSIONID boş.")
+                missing_fields.append("JSESSIONID")
         else:
             if not self.username.text().strip():
-                errors.append("Kullanıcı adı boş.")
+                missing_fields.append("Kullanıcı Adı")
             if not self.password.text().strip():
-                errors.append("Şifre boş.")
+                missing_fields.append("Şifre")
 
-      
-        if errors:
-            for error in errors:
-                self.append_log(f"❌ {error}")
+        if not self.startDate.text().strip():
+            missing_fields.append("Başlangıç Tarihi")
+        if not self.endDate.text().strip():
+            missing_fields.append("Bitiş Tarihi")
+
+        if missing_fields:
+            self.append_log(f"❌ {build_missing_fields_message(missing_fields)}")
             return False
 
         return True
