@@ -46,6 +46,7 @@ LOCAL_TZ = timezone(timedelta(hours=3))  # UTC+3
 WEEKDAYS = 5  # Pazartesi-Cuma
 DEFAULT_TIMEZONE_OFFSET = 3  # saat
 JIRA_CONNECTION_TIMEOUT_SECONDS = 10
+JIRA_CLIENT_MAX_RETRIES = 0
 
 class WorklogMode(Enum):
     """Worklog işlem modları"""
@@ -87,13 +88,11 @@ def parse_JIRA_error(e: JIRAError) -> str:
     return str(getattr(e, "text", "") or str(e) or "Bilinmeyen JIRA hatası")
 
 
-def build_jira_options(server: str, cert: Union[str, bool]) -> dict[str, Union[str, bool, int]]:
-    """Create Jira options with safe timeout and no automatic retries."""
+def build_jira_options(server: str, cert: Union[str, bool]) -> dict[str, Union[str, bool]]:
+    """Create Jira options for server and certificate validation."""
     return {
         "server": server,
         "verify": cert,
-        "timeout": JIRA_CONNECTION_TIMEOUT_SECONDS,
-        "max_retries": 0,
     }
 
 
@@ -174,7 +173,9 @@ class WorklogWorker(QThread):
             if self.jsession_id:
                 jira = JIRA(
                     options=options,
-                    get_server_info=False
+                    get_server_info=False,
+                    timeout=JIRA_CONNECTION_TIMEOUT_SECONDS,
+                    max_retries=JIRA_CLIENT_MAX_RETRIES,
                 )
                 
                 # Session ID'yi ayarla
@@ -193,13 +194,19 @@ class WorklogWorker(QThread):
                 jira = JIRA(
                     options=options,
                     basic_auth=(self.username, self.password),
-                    get_server_info=True
+                    get_server_info=True,
+                    timeout=JIRA_CONNECTION_TIMEOUT_SECONDS,
+                    max_retries=JIRA_CLIENT_MAX_RETRIES,
                 )
 
             return jira
         except JIRAError as e:
             logger.error(f"Jira bağlantısı kurulamadı: {e}")
-            self.errorSignal.emit(f"Jira bağlantı hatası: {parse_JIRA_error(e)}")
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code == 401 and not self.jsession_id:
+                self.errorSignal.emit("Geçersiz giriş.")
+            else:
+                self.errorSignal.emit(f"Jira bağlantı hatası: {parse_JIRA_error(e)}")
             return None
         except RequestException as e:
             logger.error(f"Jira bağlantısı timeout/ağ hatası: {e}")
@@ -422,7 +429,7 @@ class WorklogWorker(QThread):
                 message = parse_JIRA_error(e)
                 status_code = getattr(getattr(e, "response", None), "status_code", None)
                 if status_code == 401 and not self.jsession_id:
-                    self.errorSignal.emit("Kullanıcı adı veya şifre hatalı.")
+                    self.errorSignal.emit("Geçersiz giriş.")
                 elif status_code == 401:
                     self.errorSignal.emit("JSESSIONID geçersiz veya süresi dolmuş.")
                 else:
@@ -497,7 +504,9 @@ class AssigneeIssueCheckWorker(QThread):
             if self.jsession_id:
                 jira = JIRA(
                     options=options,
-                    get_server_info=False
+                    get_server_info=False,
+                    timeout=JIRA_CONNECTION_TIMEOUT_SECONDS,
+                    max_retries=JIRA_CLIENT_MAX_RETRIES,
                 )
                 
                 # Session ID'yi ayarla
@@ -516,10 +525,26 @@ class AssigneeIssueCheckWorker(QThread):
                 jira = JIRA(
                     options=options,
                     basic_auth=(self.username, self.password),
-                    get_server_info=True
+                    get_server_info=True,
+                    timeout=JIRA_CONNECTION_TIMEOUT_SECONDS,
+                    max_retries=JIRA_CLIENT_MAX_RETRIES,
                 )
 
             return jira
+        except JIRAError as e:
+            logger.error(f"Jira bağlantısı kurulamadı: {e}")
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code == 401 and not self.jsession_id:
+                self.errorSignal.emit("Geçersiz giriş.")
+            else:
+                self.errorSignal.emit(f"Jira bağlantı hatası: {parse_JIRA_error(e)}")
+            return None
+        except RequestException as e:
+            logger.error(f"Jira bağlantısı timeout/ağ hatası: {e}")
+            self.errorSignal.emit(
+                f"Jira bağlantısı {JIRA_CONNECTION_TIMEOUT_SECONDS} saniyede zaman aşımına uğradı veya ağ hatası oluştu."
+            )
+            return None
         except Exception as e:
             logger.error(f"Jira bağlantısı kurulamadı: {e}")
             self.errorSignal.emit(f"Jira bağlantı hatası: {str(e)}")
