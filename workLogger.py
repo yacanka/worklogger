@@ -10,6 +10,7 @@ from PyQt5.QtCore import pyqtSignal, QThread
 
 import pandas as pd
 import os
+from requests.exceptions import RequestException
 from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone, date
 
@@ -44,6 +45,7 @@ REG_PATH = r"Software\YaCanKa\Worklogger"
 LOCAL_TZ = timezone(timedelta(hours=3))  # UTC+3
 WEEKDAYS = 5  # Pazartesi-Cuma
 DEFAULT_TIMEZONE_OFFSET = 3  # saat
+JIRA_CONNECTION_TIMEOUT_SECONDS = 10
 
 class WorklogMode(Enum):
     """Worklog işlem modları"""
@@ -73,13 +75,32 @@ def in_range(day: date, start_date: datetime, end_date: datetime) -> bool:
 
 def parse_JIRA_error(e: JIRAError) -> str:
     """Parse a dictionary into a JIRAError."""
-    if hasattr(e, "response"):
-        if len(e.response.text) < 100:
-            return e.response.text
-        else:
-            return e.response.reason
-    else:
-        return e.text
+    response = getattr(e, "response", None)
+    if response is not None:
+        body = (response.text or "").strip()
+        if body and len(body) < 180:
+            return body
+        if response.reason:
+            return str(response.reason)
+        if response.status_code:
+            return f"HTTP {response.status_code}"
+    return str(getattr(e, "text", "") or str(e) or "Bilinmeyen JIRA hatası")
+
+
+def build_jira_options(server: str, cert: Union[str, bool]) -> dict[str, Union[str, bool, int]]:
+    """Create Jira options with safe timeout and no automatic retries."""
+    return {
+        "server": server,
+        "verify": cert,
+        "timeout": JIRA_CONNECTION_TIMEOUT_SECONDS,
+        "max_retries": 0,
+    }
+
+
+def is_valid_server_url(server: str) -> bool:
+    """Return True only for absolute http/https server URLs."""
+    parsed = urlparse(server.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 # ===================== AKTİVASYON =====================
 
@@ -113,6 +134,7 @@ class WorklogWorker(QThread):
         start_date: str,
         end_date: str,
         worklog_mode: str,
+        include_weekends: bool,
         parent=None
     ):
         super().__init__(parent)
@@ -124,6 +146,7 @@ class WorklogWorker(QThread):
         self.start_date = start_date
         self.end_date = end_date
         self.worklog_mode = worklog_mode
+        self.include_weekends = include_weekends
         self._cancel = False
         self._jira: Optional[JIRA] = None
 
@@ -138,12 +161,16 @@ class WorklogWorker(QThread):
     def _setup_jira_connection(self) -> Optional[JIRA]:
         """Jira bağlantısını kur ve doğrula"""
         try:
+            if not is_valid_server_url(self.jira_server):
+                self.errorSignal.emit("JIRA sunucu URL'i geçersiz. Örnek: https://jira.example.com")
+                return None
+
             cert = False
             if os.path.exists(resource_path("JIRA_Chain.crt")):
                 cert = resource_path("JIRA_Chain.crt")
 
             # JSESSIONID varsa, token ile; yoksa username/password ile bağlan
-            options = {"server": self.jira_server, "verify": cert}
+            options = build_jira_options(self.jira_server, cert)
             if self.jsession_id:
                 jira = JIRA(
                     options=options,
@@ -173,6 +200,12 @@ class WorklogWorker(QThread):
         except JIRAError as e:
             logger.error(f"Jira bağlantısı kurulamadı: {e}")
             self.errorSignal.emit(f"Jira bağlantı hatası: {parse_JIRA_error(e)}")
+            return None
+        except RequestException as e:
+            logger.error(f"Jira bağlantısı timeout/ağ hatası: {e}")
+            self.errorSignal.emit(
+                f"Jira bağlantısı {JIRA_CONNECTION_TIMEOUT_SECONDS} saniyede zaman aşımına uğradı veya ağ hatası oluştu."
+            )
             return None
         except Exception as e:
             logger.error(f"Jira bağlantısı sırasında bir hata oluştu: {e}")
@@ -212,8 +245,7 @@ class WorklogWorker(QThread):
                 self.statusSignal.emit("İşlem iptal edildi.")
                 break
 
-            # Sadece hafta içi (Pazartesi-Cuma) işle
-            if current_date.weekday() < WEEKDAYS:
+            if self.include_weekends or current_date.weekday() < WEEKDAYS:
                 self.statusSignal.emit(f"Mevcut tarih: {current_date.strftime('%d.%m.%Y')}")
                 
                 for i, (_, row) in enumerate(df.iterrows()):
@@ -385,9 +417,20 @@ class WorklogWorker(QThread):
                 if not my_account_id:
                     raise RuntimeError("Kullanıcı hesap ID'si alınamadı.")
                 self.statusSignal.emit(f"{me.get('displayName')} olarak bağlandı.")
+            except JIRAError as e:
+                logger.error(f"Kullanıcı bilgisi hatası: {e}")
+                message = parse_JIRA_error(e)
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                if status_code == 401 and not self.jsession_id:
+                    self.errorSignal.emit("Kullanıcı adı veya şifre hatalı.")
+                elif status_code == 401:
+                    self.errorSignal.emit("JSESSIONID geçersiz veya süresi dolmuş.")
+                else:
+                    self.errorSignal.emit(f"Kullanıcı bilgisi alınamadı: {message}")
+                return
             except Exception as e:
                 logger.error(f"Kullanıcı bilgisi hatası: {e}")
-                self.errorSignal.emit("JSESSIONID geçersiz. Bağlantı kurulamadı.")
+                self.errorSignal.emit(f"Kullanıcı bilgisi alınamadı: {str(e)}")
                 return
 
             # Tarih aralığını ayrıştır
@@ -441,12 +484,16 @@ class AssigneeIssueCheckWorker(QThread):
 
     def _setup_jira_connection(self) -> JIRA:
         try:
+            if not is_valid_server_url(self.jira_server):
+                self.errorSignal.emit("JIRA sunucu URL'i geçersiz. Örnek: https://jira.example.com")
+                return None
+
             cert = False
             if os.path.exists(resource_path("JIRA_Chain.crt")):
                 cert = resource_path("JIRA_Chain.crt")
 
             # JSESSIONID varsa, token ile; yoksa username/password ile bağlan
-            options = {"server": self.jira_server, "verify": cert}
+            options = build_jira_options(self.jira_server, cert)
             if self.jsession_id:
                 jira = JIRA(
                     options=options,
@@ -1076,7 +1123,7 @@ class MainWindow(QtWidgets.QWidget):
         """Jira konfigürasyonu oluştur"""
         # JIRA settings group (URL, mode, dates)
         self.jira_group = QtWidgets.QGroupBox("JIRA Ayarları")
-        self.jira_group.setMaximumHeight(120)
+        self.jira_group.setMaximumHeight(150)
 
         jira_group_layout = QtWidgets.QVBoxLayout(self.jira_group)
         jira_group_layout.setSpacing(8)
@@ -1103,6 +1150,9 @@ class MainWindow(QtWidgets.QWidget):
         self.endDate = QtWidgets.QLineEdit()
         self.endDate.setPlaceholderText("Bitiş tarihi")
         self.endDate.setText(datetime.today().strftime("%d.%m.%Y"))
+
+        self.include_weekends_checkbox = QtWidgets.QCheckBox("Hafta sonlarını dahil et")
+        self.include_weekends_checkbox.setChecked(False)
         
         top_layout.addWidget(self.jira_label, 0)
         top_layout.addWidget(self.jira_server, 1)
@@ -1115,6 +1165,7 @@ class MainWindow(QtWidgets.QWidget):
         
         jira_group_layout.addLayout(top_layout)
         jira_group_layout.addLayout(date_layout)
+        jira_group_layout.addWidget(self.include_weekends_checkbox)
 
     def _setup_table_group(self):
         # Excel-style tablo
@@ -1321,8 +1372,11 @@ class MainWindow(QtWidgets.QWidget):
         """İnput doğrulaması"""
         errors = []
 
-        if not self.jira_server.text().strip():
+        jira_server = self.jira_server.text().strip()
+        if not jira_server:
             errors.append("JIRA sunucusu boş.")
+        elif not is_valid_server_url(jira_server):
+            errors.append("JIRA URL geçersiz. Örnek: https://jira.example.com")
 
         # Authentication doğrulaması
         if self.use_jsession_checkbox.isChecked():
@@ -1472,7 +1526,8 @@ class MainWindow(QtWidgets.QWidget):
             password=password,
             start_date=self.startDate.text(),
             end_date=self.endDate.text(),
-            worklog_mode=self.mode_options.currentData()
+            worklog_mode=self.mode_options.currentData(),
+            include_weekends=self.include_weekends_checkbox.isChecked(),
         )
 
         self.worker.startedSignal.connect(self.on_worker_started)
@@ -1543,6 +1598,13 @@ class MainWindow(QtWidgets.QWidget):
             winreg.SetValueEx(key, "ActivationKey", 0, winreg.REG_SZ, self.activation_edit.text())
             winreg.SetValueEx(key, "JiraUrl", 0, winreg.REG_SZ, self.jira_server.text())
             winreg.SetValueEx(key, "UseJsession", 0, winreg.REG_SZ, str(self.use_jsession_checkbox.isChecked()))
+            winreg.SetValueEx(
+                key,
+                "IncludeWeekends",
+                0,
+                winreg.REG_SZ,
+                str(self.include_weekends_checkbox.isChecked()),
+            )
             if self.use_jsession_checkbox.isChecked():
                 winreg.SetValueEx(key, "SessionId", 0, winreg.REG_SZ, self.sessionId.text())
             else:
@@ -1595,6 +1657,12 @@ class MainWindow(QtWidgets.QWidget):
             use_jsession_str, _ = winreg.QueryValueEx(key, "UseJsession")
             use_jsession = use_jsession_str.lower() == "true"
             self.use_jsession_checkbox.setChecked(use_jsession)
+        except FileNotFoundError:
+            pass
+
+        try:
+            include_weekends_str, _ = winreg.QueryValueEx(key, "IncludeWeekends")
+            self.include_weekends_checkbox.setChecked(include_weekends_str.lower() == "true")
         except FileNotFoundError:
             pass
 
