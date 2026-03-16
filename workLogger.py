@@ -71,6 +71,16 @@ def in_range(day: date, start_date: datetime, end_date: datetime) -> bool:
     """Verilen günün tarih aralığında olup olmadığını kontrol et"""
     return start_date.date() <= day <= end_date.date()
 
+def parse_JIRA_error(e: JIRAError) -> str:
+    """Parse a dictionary into a JIRAError."""
+    if hasattr(e, "response"):
+        if len(e.response.text) < 100:
+            return e.response.text
+        else:
+            return e.response.reason
+    else:
+        return e.text
+
 # ===================== AKTİVASYON =====================
 
 def check_activation(key: str) -> Dict[str, Any]:
@@ -133,9 +143,10 @@ class WorklogWorker(QThread):
                 cert = resource_path("JIRA_Chain.crt")
 
             # JSESSIONID varsa, token ile; yoksa username/password ile bağlan
+            options = {"server": self.jira_server, "verify": cert}
             if self.jsession_id:
                 jira = JIRA(
-                    options={"server": self.jira_server, "verify": cert},
+                    options=options,
                     get_server_info=False
                 )
                 
@@ -153,15 +164,19 @@ class WorklogWorker(QThread):
             else:
                 # Username ve password ile bağlan
                 jira = JIRA(
-                    options={"server": self.jira_server, "verify": cert},
+                    options=options,
                     basic_auth=(self.username, self.password),
                     get_server_info=True
                 )
 
             return jira
-        except Exception as e:
+        except JIRAError as e:
             logger.error(f"Jira bağlantısı kurulamadı: {e}")
-            self.errorSignal.emit(f"Jira bağlantı hatası: {str(e)}")
+            self.errorSignal.emit(f"Jira bağlantı hatası: {parse_JIRA_error(e)}")
+            return None
+        except Exception as e:
+            logger.error(f"Jira bağlantısı sırasında bir hata oluştu: {e}")
+            self.errorSignal.emit(f"Jira bağlantısı sırasında bir hata oluştu: {str(e)}")
             return None
 
     def _validate_excel_columns(self, df: pd.DataFrame, mode: str) -> bool:
@@ -424,23 +439,45 @@ class AssigneeIssueCheckWorker(QThread):
         self.start_date = start_date
         self.end_date = end_date
 
-    def _create_jira_client(self) -> JIRA:
-        cert = False
-        if os.path.exists(resource_path("JIRA_Chain.crt")):
-            cert = resource_path("JIRA_Chain.crt")
-        options = {"server": self.jira_server, "verify": cert}
-        if self.jsession_id:
-            jira = JIRA(options=options, get_server_info=False)
-            jira._session.cookies.set(
-                "JSESSIONID",
-                self.jsession_id,
-                domain=urlparse(self.jira_server).netloc,
-                path="/",
-            )
-            jira._session.headers.update({"Accept": "application/json"})
-            return jira
-        return JIRA(options=options, basic_auth=(self.username, self.password), get_server_info=True)
+    def _setup_jira_connection(self) -> JIRA:
+        try:
+            cert = False
+            if os.path.exists(resource_path("JIRA_Chain.crt")):
+                cert = resource_path("JIRA_Chain.crt")
 
+            # JSESSIONID varsa, token ile; yoksa username/password ile bağlan
+            options = {"server": self.jira_server, "verify": cert}
+            if self.jsession_id:
+                jira = JIRA(
+                    options=options,
+                    get_server_info=False
+                )
+                
+                # Session ID'yi ayarla
+                jira._session.cookies.set(
+                    "JSESSIONID",
+                    self.jsession_id,
+                    domain=urlparse(self.jira_server).netloc,
+                    path="/"
+                )
+                jira._session.headers.update({
+                    "Accept": "application/json",
+                    "X-Atlassian-Token": "no-check"
+                })
+            else:
+                # Username ve password ile bağlan
+                jira = JIRA(
+                    options=options,
+                    basic_auth=(self.username, self.password),
+                    get_server_info=True
+                )
+
+            return jira
+        except Exception as e:
+            logger.error(f"Jira bağlantısı kurulamadı: {e}")
+            self.errorSignal.emit(f"Jira bağlantı hatası: {str(e)}")
+            return None
+        
     def _fetch_filtered_issues(self, jira: JIRA) -> list:
         jql = (
             'assignee = currentUser() AND issuetype = Sub-task '
@@ -462,7 +499,7 @@ class AssigneeIssueCheckWorker(QThread):
     def run(self):
         try:
             self.statusSignal.emit("🔎 Uygun issue'lar sorgulanıyor...")
-            jira = self._create_jira_client()
+            jira = self._setup_jira_connection()
             me = jira.myself()
             issues = self._fetch_filtered_issues(jira)
             issue_keys = extract_issue_keys(issues)
@@ -1205,15 +1242,28 @@ class MainWindow(QtWidgets.QWidget):
         self.startBtn.clicked.connect(self.start_processing)
         self.cancelBtn.clicked.connect(self.cancel_processing)
         self.activation_edit.textChanged.connect(self.on_activation_change)
-        self.activation_btn.clicked.connect(self.on_activation_btn_clicked)
+        self.activation_btn.clicked.connect(self._check_activation)
         self.mode_options.currentIndexChanged.connect(self.on_mode_changed)
         self.use_jsession_checkbox.stateChanged.connect(self._on_auth_mode_changed)
 
     # ----- Aktivasyon Events -----
 
-    def on_activation_btn_clicked(self):
+    def _check_activation(self, inform_on_success: bool = True) -> bool:
         """Aktivasyon kodunu uygula"""
         activation_result = check_activation(self.activation_edit.text())
+        
+        if activation_result["status"] == "valid":
+            remaining_days = activation_result["value"]
+            if inform_on_success:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Başarılı",
+                    f"Aktivasyon başarılı.\n{remaining_days} gün kullanım hakkınız kaldı."
+            )
+            self.activation_label.setText(f"✓ {remaining_days} gün")
+            self.activation_label.setStyleSheet("color: green; font-weight: bold;")
+            logger.info(f"Aktivasyon başarılı: {remaining_days} gün kaldı")
+            return True
         
         if activation_result["status"] == "invalid":
             QtWidgets.QMessageBox.critical(
@@ -1222,7 +1272,6 @@ class MainWindow(QtWidgets.QWidget):
                 "Geçersiz aktivasyon kodu."
             )
             logger.warning("Geçersiz aktivasyon kodu girildi")
-            return
 
         if activation_result["status"] == "expired":
             QtWidgets.QMessageBox.critical(
@@ -1231,18 +1280,9 @@ class MainWindow(QtWidgets.QWidget):
                 "Bu aktivasyon kodunun süresi dolmuş."
             )
             logger.warning("Süresi dolmuş aktivasyon kodu girildi")
-            return
+        
+        return False
 
-        if activation_result["status"] == "valid":
-            remaining_days = activation_result["value"]
-            QtWidgets.QMessageBox.information(
-                self,
-                "Başarılı",
-                f"Aktivasyon başarılı.\n{remaining_days} gün kullanım hakkınız kaldı."
-            )
-            self.activation_label.setText(f"✓ {remaining_days} gün")
-            self.activation_label.setStyleSheet("color: green; font-weight: bold;")
-            logger.info(f"Aktivasyon başarılı: {remaining_days} gün kaldı")
 
     def on_activation_change(self):
         """Aktivasyon kodu değiştiğinde"""
@@ -1276,7 +1316,6 @@ class MainWindow(QtWidgets.QWidget):
         self.infoLabel.setText(f"Mod: {mode_name}")
         logger.info(f"İşlem modu değiştirildi: {mode_name}")
 
-    # ----- Processing Events -----
 
     def _validate_inputs(self) -> bool:
         """İnput doğrulaması"""
@@ -1295,15 +1334,7 @@ class MainWindow(QtWidgets.QWidget):
             if not self.password.text().strip():
                 errors.append("Şifre boş.")
 
-        # Tablodan verileri kontrol et
-        df = self.dataTable.get_data_as_dataframe()
-        if df.empty:
-            errors.append("Tabloda veri yok. Lütfen veri girin.")
-
-        activation_result = check_activation(self.activation_edit.text())
-        if activation_result["status"] != "valid":
-            errors.append("Geçersiz veya süresi dolmuş aktivasyon kodu.")
-
+      
         if errors:
             for error in errors:
                 self.append_log(f"❌ {error}")
@@ -1311,8 +1342,22 @@ class MainWindow(QtWidgets.QWidget):
 
         return True
 
+    def _validate_datatable(self) -> bool:
+        """DataTable doğrulaması"""
+        df = self.dataTable.get_data_as_dataframe()
+        if df.empty:
+            self.append_log("❌ Tablo boş. Lütfen veri girin.")
+            return False
+        return True
+
     def check_assignee_issues(self):
         """Assignee olduğum issue'ları kontrol et ve worklog özetini yaz."""
+        if not self._check_activation(inform_on_success=False):
+            return
+        
+        if not self._validate_inputs():
+            return
+        
         self.log.clear()
         self.progress.setValue(0)
         self._set_running_state(True)
@@ -1381,7 +1426,13 @@ class MainWindow(QtWidgets.QWidget):
 
     def start_processing(self):
         """İşlemi başlat"""
+        if not self._check_activation(inform_on_success=False):
+            return
+        
         if not self._validate_inputs():
+            return
+        
+        if not self._validate_datatable():
             return
 
         self.progress.setValue(0)
