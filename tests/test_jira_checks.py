@@ -28,5 +28,9 @@ def test_summarize_worklogs_by_day_filters_author() -> None:
             author=SimpleNamespace(accountId="u1"),
         ),
     ]
-    result = summarize_worklogs_by_day(worklogs, author_ids={"u1"})
+    result = summarize_worklogs_by_day(
+        worklogs,
+        date_range=("2026-03-10", "2026-03-11"),
+        author_ids={"u1"},
+    )
     assert result == {"2026-03-10": 1.0, "2026-03-11": 2.0}
