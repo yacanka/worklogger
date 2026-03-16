@@ -115,7 +115,7 @@ def check_activation(key: str) -> Dict[str, Any]:
 # ----- Worker Thread -----
 
 class WorklogWorker(QThread):
-    """Excel dosyasından Jira workloglarını yönetmek için worker thread"""
+    """Tablo verisinden Jira workloglarını yönetmek için worker thread"""
     
     startedSignal = pyqtSignal(str)
     statusSignal = pyqtSignal(str)
@@ -126,7 +126,7 @@ class WorklogWorker(QThread):
     def __init__(
         self,
         jira_server: str,
-        excel_path: Path,
+        table_data: pd.DataFrame,
         jsession_id: str,
         username: str,
         password: str,
@@ -138,7 +138,7 @@ class WorklogWorker(QThread):
     ):
         super().__init__(parent)
         self.jira_server = jira_server
-        self.excel_path = excel_path
+        self.table_data = table_data.copy()
         self.jsession_id = jsession_id
         self.username = username
         self.password = password
@@ -388,15 +388,9 @@ class WorklogWorker(QThread):
         """Ana thread işlemi"""
         try:
             logger.info("Worklog işlemesi başlatılıyor")
-            self.statusSignal.emit("Excel yükleniyor...")
-            
-            # Excel dosyası yükle
-            try:
-                df = pd.read_excel(self.excel_path)
-            except Exception as e:
-                logger.error(f"Excel yükleme hatası: {e}")
-                self.errorSignal.emit(f"Excel yükleme hatası: {str(e)}")
-                return
+            self.statusSignal.emit("Tablo verisi hazırlanıyor...")
+
+            df = self.table_data.copy()
 
             # Kolon doğrulaması
             if not self._validate_excel_columns(df, self.worklog_mode):
@@ -1521,16 +1515,6 @@ class MainWindow(QtWidgets.QWidget):
 
         # Tablodan DataFrame oluştur
         df = self.dataTable.get_data_as_dataframe()
-        
-        # Geçici bir Excel dosyasına kaydet
-        temp_excel_path = Path(os.path.expandvars("%TEMP%")) / "worklogger_temp.xlsx"
-        try:
-            df.to_excel(temp_excel_path, index=False)
-        except Exception as e:
-            self.append_log(f"❌ Geçici dosya oluşturma hatası: {str(e)}")
-            self._set_running_state(False)
-            logger.error(f"Geçici dosya oluşturma hatası: {e}")
-            return
 
         # Authentication parametreleri
         jsession_id = ""
@@ -1545,7 +1529,7 @@ class MainWindow(QtWidgets.QWidget):
 
         self.worker = WorklogWorker(
             jira_server=self.jira_server.text(),
-            excel_path=temp_excel_path,
+            table_data=df,
             jsession_id=jsession_id,
             username=username,
             password=password,
