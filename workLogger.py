@@ -243,7 +243,7 @@ class WorklogWorker(QThread):
         fail_count = 0
         total = len(df)
 
-        self.statusSignal.emit("Worklog ekleniyor...")
+        self.statusSignal.emit("📝 Worklog ekleniyor...")
         self.statusSignal.emit("- - - - -")
 
         current_date = start_date
@@ -345,6 +345,10 @@ class WorklogWorker(QThread):
                             continue
 
                         started_dt = parse_jira_started(started_str)
+
+                        if not (self.include_weekends or started_dt.weekday() < WEEKDAYS):
+                            continue
+
                         if not in_range(started_dt.date(), start_date, end_date):
                             continue
 
@@ -388,7 +392,8 @@ class WorklogWorker(QThread):
         """Ana thread işlemi"""
         try:
             logger.info("Worklog işlemesi başlatılıyor")
-            self.statusSignal.emit("Tablo verisi hazırlanıyor...")
+            self.statusSignal.emit("📊 Tablo verisi hazırlanıyor...")
+
 
             df = self.table_data.copy()
 
@@ -406,7 +411,7 @@ class WorklogWorker(QThread):
             self.statusSignal.emit(f"{total} satır bulundu.")
 
             # Jira bağlantısı kur
-            self.statusSignal.emit("Jira bağlantısı kuruluyor...")
+            self.statusSignal.emit("🌐 Jira bağlantısı kuruluyor...")
             jira = self._setup_jira_connection()
             if not jira:
                 return
@@ -564,9 +569,12 @@ class AssigneeIssueCheckWorker(QThread):
 
     def run(self):
         try:
-            self.statusSignal.emit("🔎 Uygun issue'lar sorgulanıyor...")
+            self.statusSignal.emit("🌐 Jira bağlantısı kuruluyor...")
             jira = self._setup_jira_connection()
+            if not jira:
+                return
             me = jira.myself()
+            self.statusSignal.emit("🔎 Uygun issue'lar sorgulanıyor...")
             issues = self._fetch_filtered_issues(jira)
             issue_keys = extract_issue_keys(issues)
             self.statusSignal.emit("🗓 Worklog takvimi inceleniyor...")
@@ -1248,38 +1256,48 @@ class MainWindow(QtWidgets.QWidget):
         self.checkBtn.setCursor(QtCore.Qt.PointingHandCursor)
         self.checkBtn.setStyleSheet("""
             QPushButton {
-                background-color: #19A0FF;
-                color: white;
-                border: none;
+                background-color: #3ACAFF;
+                color: #222222;
+                border: 1px solid #aaaaaa;
                 padding: 8px 16px;
                 border-radius: 4px;
                 font-weight: bold;
+                font-size: 12px;
             }
             QPushButton:hover {
-                background-color: #168CDE;
+                background-color: #4ECFFF;
             }
             QPushButton:pressed {
-                background-color: #1272B5;
+                background-color: #33B2E0;
+            }
+            QPushButton:disabled {
+                background-color: #EBEBFF;
+                color: gray;
             }
         """)
 
-        self.startBtn = QtWidgets.QPushButton("▶️ Başlat")
+        self.startBtn = QtWidgets.QPushButton("🚀 Başlat")
         self.startBtn.setEnabled(True)
         self.startBtn.setCursor(QtCore.Qt.PointingHandCursor)
         self.startBtn.setStyleSheet("""
             QPushButton {
-                background-color: #107C10;
-                color: white;
-                border: none;
+                background-color: #00E89A;
+                color: #222222;
+                border: 1px solid #aaaaaa;
                 padding: 8px 16px;
                 border-radius: 4px;
                 font-weight: bold;
+                font-size: 12px;
             }
             QPushButton:hover {
-                background-color: #0d6609;
+                background-color: #1AEAA4;
             }
             QPushButton:pressed {
-                background-color: #0a4d07;
+                background-color: #00CC88;
+            }
+            QPushButton:disabled {
+                background-color: #EBFFEB;
+                color: gray;
             }
         """)
 
@@ -1288,21 +1306,23 @@ class MainWindow(QtWidgets.QWidget):
         self.cancelBtn.setCursor(QtCore.Qt.PointingHandCursor)
         self.cancelBtn.setStyleSheet("""
             QPushButton {
-                background-color: #E74C3C;
-                color: white;
-                border: none;
+                background-color: #FF595E;
+                color: #222222;
+                border: 1px solid #aaaaaa;
                 padding: 8px 16px;
                 border-radius: 4px;
                 font-weight: bold;
+                font-size: 12px;
             }
             QPushButton:hover {
-                background-color: #c0392b;
+                background-color: #FF6A6E;
             }
             QPushButton:pressed {
-                background-color: #a93226;
+                background-color: #E04E53;
             }
             QPushButton:disabled {
-                background-color: #C78D8E;
+                background-color: #FFEBEB;
+                color: gray;
             }
         """)
 
@@ -1453,7 +1473,7 @@ class MainWindow(QtWidgets.QWidget):
         self.check_worker.start()
 
     def _suggest_issue_key(self, issue_keys: list) -> None:
-        self.append_log(f"Eşleşen issue sayısı: {len(issue_keys)}")
+        self.append_log(f"\nUygun issue sayısı: {len(issue_keys)}")
         for issue_key in issue_keys:
             self.append_log(f"✓ {issue_key}")
 
@@ -1463,6 +1483,8 @@ class MainWindow(QtWidgets.QWidget):
             self.append_log("ℹ Kriterlere uygun kendi worklog kaydı bulunamadı.")
             self.append_log("ℹ Kriterler:\n - assignee = currentUser()\n - issuetype = Sub-task\n - status = In Progress\n - duedate > startOfDay()")
             return
+        
+        self.append_log(f"\nTakvim")
         for day_key, hour_total in daily_totals.items():
             status_icon = "🔴" if hour_total <= 0 else "🟡" if hour_total < 8 else "🟢" if hour_total == 8 else "🔵"
             self.append_log(f"{status_icon} {day_key}: {hour_total:.2f} saat")
@@ -1510,7 +1532,6 @@ class MainWindow(QtWidgets.QWidget):
 
         self.progress.setValue(0)
         self.log.clear()
-        self.append_log("🔄 İş parçacığı başlatılıyor...")
         self._set_running_state(True)
 
         # Tablodan DataFrame oluştur
