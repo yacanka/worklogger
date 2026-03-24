@@ -38,3 +38,39 @@ entry = WorklogEntry(
 )
 service.create_worklogs([entry])
 ```
+
+
+## License Generation (ActivationCodeGenerator)
+
+### 1) Generate Ed25519 keys
+
+```bash
+python ActivationCodeGenerator.py generate-keys --output-dir ./license_keys
+```
+
+This creates:
+- `./license_keys/private_key.ed25519` (keep secret, generator side only)
+- `./license_keys/public_key.ed25519` (embed in app at `src/worklogger/keys/public_key.ed25519`)
+
+### 2) Create a signed license token
+
+```bash
+python ActivationCodeGenerator.py create-license \
+  --private-key ./license_keys/private_key.ed25519 \
+  --license-id LIC-2026-0001 \
+  --customer-id CUST-100 \
+  --product worklogger \
+  --days 30 \
+  --feature jira-sync \
+  --username alice
+```
+
+Output:
+1. Canonical JSON payload
+2. Compact `payload.signature` license token (base64url)
+
+### 3) Activate in application
+
+Paste the generated token into the activation field in the app.
+
+> Security note: never ship `private_key.ed25519` with the client.
