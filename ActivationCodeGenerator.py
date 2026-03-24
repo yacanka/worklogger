@@ -1,48 +1,54 @@
-from datetime import datetime, timedelta
-from base64 import b64decode, b64encode
+"""CLI generator for signed license tokens."""
 
-def encrypt_decrypt(text, key):
-    result = []
-    key_length = len(key)
-    key_as_int = [ord(i) for i in key]
-    text_int = [ord(i) for i in text]
-    for i in range(len(text_int)):
-        value = text_int[i] ^ key_as_int[i % key_length]
-        result.append(chr(value))
-    return "".join(result)
+from __future__ import annotations
 
-def stripEquals(text):
-    if text.endswith('=='):
-        return text.rstrip('=')
-    else:
-        print("!! ERROR! There are some problems with the activation code !!")
-        return ""
-    return text
+import argparse
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-def str_to_base64(str_text):
-    byte_metin = str_text.encode('utf-8')
-    return b64encode(byte_metin).decode('utf-8')
+SRC_PATH = Path(__file__).resolve().parent / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
 
-def base64_to_str(base64_text):
-    base64_byte = base64_text.encode('utf-8')
-    return b64decode(base64_byte).decode('utf-8')
-
-def CreateCode(day_offset, id):
-    future_day = datetime.today() + timedelta(days=day_offset)
-    future_str = future_day.strftime("%d.%m.%Y")
-   
-    code = encrypt_decrypt(str_to_base64(future_str), str_to_base64(id))
-    result = stripEquals(str_to_base64(code))
-
-    print(code)
-    print(future_str)
-    print(str_to_base64(future_str))
-    print(str_to_base64(id))
-    print(result)
-
-    return result
+from worklogger.license_signer import build_payload, payload_to_pretty_json, sign_license
 
 
-dayOffset = int(input("Enter day offset: "))
-ID = input("Enter identity number: ")
-print(CreateCode(dayOffset, ID))
+def main() -> None:
+    """Generate a signed license from CLI parameters."""
+    args = parse_args()
+    issued_at = datetime.now(timezone.utc)
+    payload = build_payload(_payload_fields(args, issued_at))
+    print(payload_to_pretty_json(payload))
+    print(sign_license(payload, args.private_key))
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse generator arguments."""
+    parser = argparse.ArgumentParser(description="Create a signed Worklogger license")
+    parser.add_argument("--private-key", required=True)
+    parser.add_argument("--license-id", required=True)
+    parser.add_argument("--customer-id", required=True)
+    parser.add_argument("--product", default="worklogger")
+    parser.add_argument("--days", type=int, required=True)
+    parser.add_argument("--feature", action="append", default=[])
+    parser.add_argument("--username")
+    return parser.parse_args()
+
+
+def _payload_fields(args: argparse.Namespace, issued_at: datetime) -> dict[str, object]:
+    expires_at = issued_at + timedelta(days=args.days)
+    return {
+        "version": 1,
+        "license_id": args.license_id,
+        "customer_id": args.customer_id,
+        "product": args.product,
+        "issued_at": issued_at.isoformat().replace("+00:00", "Z"),
+        "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+        "features": args.feature,
+        "username": args.username,
+    }
+
+
+if __name__ == "__main__":
+    main()
