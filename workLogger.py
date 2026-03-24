@@ -25,11 +25,11 @@ from jira import JIRA
 from jira.exceptions import JIRAError
 
 # activation
-from Activation import ConvertActivationCode, CheckActivationStatus
 SRC_PATH = Path(__file__).resolve().parent / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
+from Activation import verify_activation_code
 from worklogger.legacy_utils import check_activation_status, parse_flexible_date, parse_hour_minute
 from worklogger.jira_checks import extract_issue_keys, summarize_worklogs_by_day
 
@@ -107,8 +107,7 @@ def check_activation(key: str) -> Dict[str, Any]:
     """Aktivasyon kodunu kontrol et."""
     result = check_activation_status(
         key=key,
-        convert_code=ConvertActivationCode,
-        check_status=CheckActivationStatus,
+        verifier=verify_activation_code,
     )
     return result.to_dict()
 
@@ -1355,22 +1354,19 @@ class MainWindow(QtWidgets.QWidget):
             logger.info(f"Aktivasyon başarılı: {remaining_days} gün kaldı")
             return True
         
-        if activation_result["status"] == "invalid":
+        error_messages = {
+            "malformed": "Lisans formatı bozuk veya okunamadı.",
+            "invalid_signature": "Lisans imzası doğrulanamadı.",
+            "username_mismatch": "Bu lisans farklı bir kullanıcı için oluşturulmuş.",
+            "expired": "Bu aktivasyon kodunun süresi dolmuş.",
+        }
+        if activation_result["status"] in error_messages:
             QtWidgets.QMessageBox.critical(
                 self,
                 "Hata",
-                "Geçersiz aktivasyon kodu."
+                error_messages[activation_result["status"]]
             )
-            logger.warning("Geçersiz aktivasyon kodu girildi")
-
-        if activation_result["status"] == "expired":
-            QtWidgets.QMessageBox.critical(
-                self,
-                "Hata",
-                "Bu aktivasyon kodunun süresi dolmuş."
-            )
-            logger.warning("Süresi dolmuş aktivasyon kodu girildi")
-        
+            logger.warning("Aktivasyon reddedildi: %s", activation_result["status"])
         return False
 
 

@@ -4,12 +4,8 @@ from datetime import datetime
 
 import pytest
 
-from worklogger.legacy_utils import (
-    ActivationState,
-    check_activation_status,
-    parse_flexible_date,
-    parse_hour_minute,
-)
+from worklogger.legacy_utils import ActivationState, check_activation_status, parse_flexible_date, parse_hour_minute
+from worklogger.license_schema import LicenseStatus, LicenseValidationResult
 
 
 @pytest.mark.parametrize("raw_date", ["12.05.2025", "12/05/2025", "2025-05-12", "12-05-2025"])
@@ -19,8 +15,7 @@ def test_parse_flexible_date_formats(raw_date: str) -> None:
 
 def test_parse_flexible_date_datetime_to_object() -> None:
     source = datetime(2025, 5, 12, 8, 0)
-    parsed = parse_flexible_date(source, to_string=False)
-    assert parsed == source
+    assert parse_flexible_date(source, to_string=False) == source
 
 
 def test_parse_flexible_date_invalid_returns_none() -> None:
@@ -35,19 +30,21 @@ def test_parse_hour_minute(hour_value: str, expected: tuple[int, int]) -> None:
     assert parse_hour_minute(hour_value) == expected
 
 
-def test_check_activation_status_valid() -> None:
-    result = check_activation_status("abc", lambda _: "12.05.2025", lambda _: 4)
-    assert result.status == ActivationState.VALID
-    assert result.value == 4
-
-
-def test_check_activation_status_invalid() -> None:
-    result = check_activation_status("abc", lambda _: None, lambda _: 0)
-    assert result.status == ActivationState.INVALID
-    assert result.to_dict() == {"status": "invalid", "value": 0}
-
-
-def test_check_activation_status_expired() -> None:
-    result = check_activation_status("abc", lambda _: "12.05.2025", lambda _: -2)
-    assert result.status == ActivationState.EXPIRED
-    assert result.value == -2
+@pytest.mark.parametrize(
+    ("license_status", "expected_state", "remaining_days"),
+    [
+        (LicenseStatus.VALID, ActivationState.VALID, 4),
+        (LicenseStatus.EXPIRED, ActivationState.EXPIRED, -2),
+        (LicenseStatus.INVALID_SIGNATURE, ActivationState.INVALID_SIGNATURE, 0),
+        (LicenseStatus.MALFORMED, ActivationState.MALFORMED, 0),
+        (LicenseStatus.USERNAME_MISMATCH, ActivationState.USERNAME_MISMATCH, 0),
+    ],
+)
+def test_check_activation_status_maps_verification_result(
+    license_status: LicenseStatus,
+    expected_state: ActivationState,
+    remaining_days: int,
+) -> None:
+    result = check_activation_status("abc", lambda _: LicenseValidationResult(license_status, remaining_days))
+    assert result.status == expected_state
+    assert result.value == remaining_days
