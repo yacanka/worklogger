@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from worklogger.legacy_utils import parse_flexible_date
@@ -20,20 +20,28 @@ def extract_issue_keys(issues: Sequence[Any]) -> List[str]:
 
 def summarize_worklogs_by_day(
     worklogs: Iterable[Any],
-    date_range: Tuple[str, str],
+    date_range: Optional[Tuple[str, str]] = None,
     author_ids: Optional[Set[str]] = None,
 ) -> Dict[str, float]:
     """Aggregate worklog durations per day as hours, including empty days."""
 
-    start_date_str, end_date_str = date_range
-    start_date = parse_flexible_date(start_date_str, to_string=False).date()
-    end_date = parse_flexible_date(end_date_str, to_string=False).date()
+    eligible_worklogs = [
+        worklog for worklog in worklogs if not author_ids or _is_author_allowed(worklog, author_ids)
+    ]
+    if date_range:
+        start_date_str, end_date_str = date_range
+        start_date = parse_flexible_date(start_date_str, to_string=False).date()
+        end_date = parse_flexible_date(end_date_str, to_string=False).date()
+    else:
+        dates = _extract_dates(eligible_worklogs)
+        if not dates:
+            return {}
+        start_date = min(dates)
+        end_date = max(dates)
 
     totals = defaultdict(float)
 
-    for worklog in worklogs:
-        if author_ids and not _is_author_allowed(worklog, author_ids):
-            continue
+    for worklog in eligible_worklogs:
 
         started = getattr(worklog, "started", None)
         seconds = int(getattr(worklog, "timeSpentSeconds", 0) or 0)
@@ -65,3 +73,16 @@ def _is_author_allowed(worklog: Any, author_ids: Set[str]) -> bool:
         str(getattr(author, "name", "")).strip(),
     }
     return any(candidate and candidate in author_ids for candidate in candidates)
+
+
+def _extract_dates(worklogs: Iterable[Any]) -> List[date]:
+    extracted_dates = []
+    for worklog in worklogs:
+        started = getattr(worklog, "started", None)
+        if not started:
+            continue
+        try:
+            extracted_dates.append(datetime.strptime(started, JIRA_STARTED_FORMAT).date())
+        except ValueError:
+            continue
+    return extracted_dates
