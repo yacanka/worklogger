@@ -8,6 +8,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Callable, Dict, Optional, Tuple, Union
 
+from worklogger.license_schema import LicenseStatus, LicenseValidationResult
+
 logger = logging.getLogger(__name__)
 ISO_DATE_FORMAT = "%Y-%m-%d"
 HOUR_MIN = 0
@@ -30,7 +32,9 @@ class ActivationState(str, Enum):
 
     VALID = "valid"
     EXPIRED = "expired"
-    INVALID = "invalid"
+    INVALID_SIGNATURE = "invalid_signature"
+    MALFORMED = "malformed"
+    USERNAME_MISMATCH = "username_mismatch"
 
 
 @dataclass(frozen=True)
@@ -45,10 +49,16 @@ class ActivationResult:
         return {"status": self.status.value, "value": self.value}
 
 
-def parse_flexible_date(
-    date_input: Union[str, datetime],
-    to_string: bool = True,
-) -> Optional[Union[datetime, str]]:
+STATUS_MAP = {
+    LicenseStatus.VALID: ActivationState.VALID,
+    LicenseStatus.EXPIRED: ActivationState.EXPIRED,
+    LicenseStatus.INVALID_SIGNATURE: ActivationState.INVALID_SIGNATURE,
+    LicenseStatus.MALFORMED: ActivationState.MALFORMED,
+    LicenseStatus.USERNAME_MISMATCH: ActivationState.USERNAME_MISMATCH,
+}
+
+
+def parse_flexible_date(date_input: Union[str, datetime], to_string: bool = True) -> Optional[Union[datetime, str]]:
     """Parse supported date values and return normalized output."""
     if isinstance(date_input, datetime):
         return date_input.strftime(ISO_DATE_FORMAT) if to_string else date_input
@@ -95,16 +105,7 @@ def _is_valid_time(hour: int, minute: int) -> bool:
     return HOUR_MIN <= hour <= HOUR_MAX and MINUTE_MIN <= minute <= MINUTE_MAX
 
 
-def check_activation_status(
-    key: str,
-    convert_code: Callable[[str], Optional[str]],
-    check_status: Callable[[str], int],
-) -> ActivationResult:
-    """Evaluate activation key using injected conversion/status functions."""
-    pure_key = convert_code(key)
-    if not pure_key:
-        return ActivationResult(status=ActivationState.INVALID, value=0)
-    remaining_days = check_status(pure_key)
-    if remaining_days >= 0:
-        return ActivationResult(status=ActivationState.VALID, value=remaining_days)
-    return ActivationResult(status=ActivationState.EXPIRED, value=remaining_days)
+def check_activation_status(key: str, verifier: Callable[[str], LicenseValidationResult]) -> ActivationResult:
+    """Evaluate activation key using the signed-license verifier."""
+    verification = verifier(key)
+    return ActivationResult(status=STATUS_MAP[verification.status], value=verification.remaining_days)
